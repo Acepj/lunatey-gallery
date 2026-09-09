@@ -18,14 +18,16 @@ import { readAlbumSpreads, saveAlbumSpreads } from "./album-service";
 const savedAtKey = "birthday-album-saved-at";
 const imageCacheKey = "birthday-album-image-urls";
 
-/** Milliseconds. Local saves newer than this win over a stale cloud copy. */
-const LOCAL_TIEBREAK_MS = 20_000;
-
 type CloudState = {
   cloud: boolean;
+  reason?: string;
   spreads: AlbumSpread[] | null;
   savedAt: number;
 };
+
+export type CloudSyncStatus =
+  | { on: true }
+  | { on: false; reason: "not-configured" | "blob-error" | "unreachable" };
 
 async function fetchCloudState(): Promise<CloudState | null> {
   try {
@@ -81,6 +83,15 @@ function isSpreadList(value: unknown): value is AlbumSpread[] {
   );
 }
 
+/** Total photographs across every page of a book. */
+function countPhotos(spreads: AlbumSpread[]): number {
+  return spreads.reduce(
+    (total, spread) =>
+      total + spread.left.photos.length + spread.right.photos.length,
+    0,
+  );
+}
+
 /**
  * Fetch the shared cloud book and adopt it when it is newer than this
  * device's copy. Returns the adopted spreads, or null when the cloud is
@@ -91,12 +102,36 @@ export async function pullCloudAlbum(): Promise<AlbumSpread[] | null> {
   if (!state || !state.cloud || !isSpreadList(state.spreads)) return null;
   if (state.spreads.length === 0) return null;
   const localAt = readLocalSavedAt();
-  // Cloud must be strictly newer; if this device saved more recently it is
-  // the source of truth and its next save will overwrite the cloud copy.
-  if (state.savedAt <= localAt) return null;
+  // Adopt when the cloud is strictly newer — or when it simply holds more
+  // photographs than this device (a device whose clock is off must never
+  // hide photos that were added somewhere else; last-writer still wins the
+  // moment this device saves).
+  const local = readAlbumSpreads();
+  const newer = state.savedAt > localAt;
+  const richer = countPhotos(state.spreads) > countPhotos(local ?? []);
+  if (!newer && !richer) return null;
   saveAlbumSpreads(state.spreads);
   writeLocalSavedAt(state.savedAt);
   return state.spreads;
+}
+
+/**
+ * Is the shared cloud album actually reachable from this deployment?
+ * The celebrant UI uses this so a silently-off sync is never invisible:
+ * "not-configured" = the Vercel Blob token is not attached to the deployment;
+ * "blob-error" = token exists but the store could not be read;
+ * "unreachable" = the network request itself failed.
+ */
+export async function checkCloudSync(): Promise<CloudSyncStatus> {
+  const state = await fetchCloudState();
+  if (!state) return { on: false, reason: "unreachable" };
+  if (!state.cloud) {
+    return {
+      on: false,
+      reason: state.reason === "blob-error" ? "blob-error" : "not-configured",
+    };
+  }
+  return { on: true };
 }
 
 /** Cheap stable key for the data-URL → cloud-URL cache. */

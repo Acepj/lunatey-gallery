@@ -41,9 +41,11 @@ import {
 } from "@/lib/upload-service";
 import type { CustomSticker } from "@/lib/upload-service";
 import {
+  checkCloudSync,
   noteLocalAlbumSave,
   pullCloudAlbum,
   pushCloudAlbum,
+  type CloudSyncStatus,
 } from "@/lib/album-sync";
 import {
   getCustomStickerSrc,
@@ -1398,6 +1400,9 @@ function AlbumOverlay({
   const [enteringPhotoId, setEnteringPhotoId] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [hintVisible, setHintVisible] = useState(true);
+  /* Shared-cloud album status — checked when the book mounts so a silently
+     off sync (missing Blob token) is visible in Edit mode, never hidden. */
+  const [cloudSync, setCloudSync] = useState<CloudSyncStatus | null>(null);
 
   const reduceMotion = useReducedMotion();
   const bookRef = useRef<HTMLDivElement>(null);
@@ -1428,9 +1433,14 @@ function AlbumOverlay({
   useEffect(() => {
     if (!canEdit) return;
     let cancelled = false;
-    void pullCloudAlbum().then((cloud) => {
-      if (cancelled || !cloud || draftRef.current) return;
-      setSpreads(loadStoredAlbum());
+    void pullCloudAlbum().then(async (cloud) => {
+      if (cancelled) return;
+      const status: CloudSyncStatus = cloud
+        ? { on: true }
+        : await checkCloudSync();
+      if (cancelled) return;
+      setCloudSync(status);
+      if (cloud && !draftRef.current) setSpreads(loadStoredAlbum());
     });
     return () => {
       cancelled = true;
@@ -2248,6 +2258,19 @@ const albumStars = useMemo(
               className="text-center text-[8px] uppercase tracking-[0.3em] text-sand/45"
             >
               Drag the page edge to turn &middot; or tap an edge
+            </motion.p>
+          )}
+          {cloudSync && !cloudSync.on && phase === "reading" && (
+            <motion.p
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              transition={{ duration: 0.8, ease }}
+              className="text-center text-[8px] uppercase tracking-[0.3em] text-blush/70"
+            >
+              {cloudSync.reason === "not-configured"
+                ? "Cloud sync is off — photos stay on this device · connect Vercel Blob storage, then redeploy"
+                : "Cloud sync is unreachable — photos stay on this device for now"}
             </motion.p>
           )}
         </AnimatePresence>

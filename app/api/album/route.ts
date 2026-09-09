@@ -13,7 +13,9 @@ const STATE_PATH = "albums/album-state.json";
  */
 export async function GET(): Promise<NextResponse> {
   if (!process.env.BLOB_READ_WRITE_TOKEN) {
-    return NextResponse.json({ cloud: false });
+    // Diagnosable on purpose: open /api/album in a browser. "not-configured"
+    // means the Blob token is not attached to this deployment at all.
+    return NextResponse.json({ cloud: false, reason: "not-configured" });
   }
   try {
     const listed = await list({ prefix: STATE_PATH });
@@ -33,7 +35,9 @@ export async function GET(): Promise<NextResponse> {
       savedAt: Number(data.savedAt) || 0,
     });
   } catch {
-    return NextResponse.json({ cloud: false });
+    // Token exists but Blob access failed (wrong/disconnected store, lapsed
+    // deployment env…). Reported distinctly so the cause is findable.
+    return NextResponse.json({ cloud: false, reason: "blob-error" });
   }
 }
 
