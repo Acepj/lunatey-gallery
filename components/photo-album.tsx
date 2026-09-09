@@ -41,6 +41,11 @@ import {
 } from "@/lib/upload-service";
 import type { CustomSticker } from "@/lib/upload-service";
 import {
+  noteLocalAlbumSave,
+  pullCloudAlbum,
+  pushCloudAlbum,
+} from "@/lib/album-sync";
+import {
   getCustomStickerSrc,
   getStickerIndex,
   MemorySticker,
@@ -1410,6 +1415,37 @@ function AlbumOverlay({
   } | null>(null);
   const timerIds = useRef<number[]>([]);
 
+  /* Latest draft, readable from async callbacks without re-running them. */
+  const draftRef = useRef<AlbumSpread[] | null>(null);
+  useEffect(() => {
+    draftRef.current = draft;
+  }, [draft]);
+
+  /* Cross-device sync: when the celebrant opens the book, check the shared
+     cloud copy first. If another device (laptop, phone…) saved a newer book,
+     adopt it here — that is what makes photos added on one device visible on
+     every other one. If she is mid-edit, her session wins. */
+  useEffect(() => {
+    if (!canEdit) return;
+    let cancelled = false;
+    void pullCloudAlbum().then((cloud) => {
+      if (cancelled || !cloud || draftRef.current) return;
+      setSpreads(loadStoredAlbum());
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [canEdit]);
+
+  /** One path for every album save: device storage + cloud mirror. */
+  function persistAlbum(next: AlbumSpread[]): void {
+    saveAlbumSpreads(next);
+    noteLocalAlbumSave();
+    pruneAlbumUploads(next);
+    onAlbumSaved?.(next);
+    void pushCloudAlbum(next);
+  }
+
   useEffect(() => {
     flipRef.current = flip;
   }, [flip]);
@@ -1700,9 +1736,7 @@ function AlbumOverlay({
     })));
     setDraft(next);
     setSpreads(next);
-    saveAlbumSpreads(next);
-    pruneAlbumUploads(next);
-    onAlbumSaved?.(next);
+    persistAlbum(next);
     setEditPhoto(null);
     setNotice("Memory updated and saved");
   }
@@ -1722,9 +1756,7 @@ function AlbumOverlay({
     })));
     setDraft(next);
     setSpreads(next);
-    saveAlbumSpreads(next);
-    pruneAlbumUploads(next);
-    onAlbumSaved?.(next);
+    persistAlbum(next);
     setEditPhoto(null);
     setNotice("Memory removed from the album");
   }
@@ -1884,9 +1916,7 @@ function AlbumOverlay({
     })();
     setDraft(next);
     setSpreads(next);
-    saveAlbumSpreads(next);
-    pruneAlbumUploads(next);
-    onAlbumSaved?.(next);
+    persistAlbum(next);
     setAddOpen(false);
     // Turn to the page the photo landed on so she sees it right away.
     timerIds.current.push(
@@ -1918,9 +1948,7 @@ function AlbumOverlay({
     if (!draft) return;
     const saved = normalizePageNumbers(draft);
     setSpreads(saved);
-    saveAlbumSpreads(saved);
-    pruneAlbumUploads(saved);
-    onAlbumSaved?.(saved);
+    persistAlbum(saved);
     setDraft(null);
     setEditing(false);
     setEditPhoto(null);
