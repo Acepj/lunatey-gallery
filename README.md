@@ -1,36 +1,45 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# A Little Something For Amara — birthday gallery
+
+A Next.js 16 birthday gallery for the celebrant. Visitors can upload
+photographs, add memories, curate a photo album, and place stickers — every
+change auto-saves and appears on every device from the same link.
 
 ## Getting Started
 
-First, run the development server:
-
 ```bash
+npm install
 npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+Open [http://localhost:3000](http://localhost:3000).
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+## How saving works
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+- **Images** (photos, album photos, custom stickers) are uploaded to
+  **Cloudinary** through `app/api/upload/route.ts` and stored as permanent URLs.
+- **State** (memory list, photo metadata, stickers + positions/rotation/size,
+  the album book) is stored as one JSON document in **Vercel Blob** through
+  `app/api/gallery/route.ts`. Every device loads the same document, so the same
+  link shows the same content everywhere.
+- A small chip in the corner shows the live status: **Saving… / Saved ✓ /
+  Failed to save**. "Saved ✓" only appears after the cloud accepted the newest
+  state. If the cloud is unreachable, your data is still kept on the device and
+  the indicator explains the situation instead of silently dropping anything.
+- Everything is automatic — there is no save button and no passphrase or lock
+  screen.
 
-## Learn More
+## Environment variables
 
-To learn more about Next.js, take a look at the following resources:
+See `.env.local` — the Cloudinary values are already set. To enable
+cross-device sync you must also add a Vercel Blob token:
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
-
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+1. Deploy the project to Vercel (or run `vercel link`).
+2. In the Vercel dashboard, create a Blob read/write token
+   (Storage → Blob → New token).
+3. Set `BLOB_READ_WRITE_TOKEN=vercel_blob_rw_…` in your Vercel project's
+   environment variables (and optionally in `.env.local` for local testing).
 
 ## Deploy on Vercel
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
-
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+Push the repository to Vercel as usual. Remember to set both the Cloudinary
+and `BLOB_READ_WRITE_TOKEN` environment variables in the Vercel dashboard.

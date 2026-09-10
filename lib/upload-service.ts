@@ -1,3 +1,5 @@
+
+
 export type UploadedPhoto = {
   id: string;
   src: string;
@@ -6,8 +8,6 @@ export type UploadedPhoto = {
   date: string;
   caption: string;
   layout: "tall" | "wide" | "square" | "feature";
-  // Optional: "no sticker" is undefined + no image. Older saves wrote 0 for
-  // "none", which `getStickerIndex` now treats as "no sticker" too.
   stickerIndex?: number;
   customStickerSrc?: string;
   stickerPositionX?: number;
@@ -23,6 +23,25 @@ export type CustomSticker = {
 
 const photoStorageKey = "birthday-gallery-uploads";
 const stickerStorageKey = "birthday-custom-stickers";
+const cachedImageUrlPrefix = "lunatey-image-url-cache:";
+
+function cacheImageUrl(key: string, url: string): void {
+  if (typeof window === "undefined") return;
+  try {
+    window.localStorage.setItem(cachedImageUrlPrefix + key, url);
+  } catch {
+    // ignore
+  }
+}
+
+function readCachedImageUrl(key: string): string | null {
+  if (typeof window === "undefined") return null;
+  try {
+    return window.localStorage.getItem(cachedImageUrlPrefix + key) ?? null;
+  } catch {
+    return null;
+  }
+}
 
 /**
  * Crash-safe localStorage write. Browsers can refuse writes when storage is
@@ -35,7 +54,7 @@ export function safeWrite(key: string, value: string): boolean {
     window.localStorage.setItem(key, value);
     return true;
   } catch (error) {
-    console.warn(
+    console.error(
       "Birthday site: storage is full or unavailable. Free some space or remove a few photos.",
       error,
     );
@@ -78,6 +97,17 @@ export function saveUploadedPhotos(photos: UploadedPhoto[]): void {
     photoStorageKey,
     JSON.stringify([...photos, ...existing]),
   );
+}
+
+/**
+ * Overwrite the whole uploaded-photos list in one write. Used by the cloud
+ * sync layer so a pulled or pushed snapshot can never duplicate what is
+ * already in storage (the prepending variant above is only for brand-new
+ * uploads).
+ */
+export function replaceUploadedPhotos(photos: UploadedPhoto[]): boolean {
+  if (typeof window === "undefined") return false;
+  return safeWrite(photoStorageKey, JSON.stringify(photos));
 }
 
 export function removeUploadedPhoto(id: string): void {
@@ -156,6 +186,14 @@ export function saveCustomStickers(stickers: CustomSticker[]): boolean {
   return ok;
 }
 
+/** Overwrite the whole sticker list in one write (used by the cloud layer). */
+export function replaceCustomStickers(stickers: CustomSticker[]): boolean {
+  if (typeof window === "undefined") return false;
+  const ok = safeWrite(stickerStorageKey, JSON.stringify(stickers));
+  if (ok) notifyStickersChanged();
+  return ok;
+}
+
 export function removeCustomSticker(id: string): void {
   const remaining = readCustomStickers().filter((s) => s.id !== id);
   if (safeWrite(stickerStorageKey, JSON.stringify(remaining))) {
@@ -170,11 +208,17 @@ function notifyStickersChanged(): void {
 }
 
 function readFileAsDataUrl(file: File): Promise<string> {
-  return new Promise<string>((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => resolve(String(reader.result));
-    reader.onerror = () => reject(new Error("Unable to read file"));
-    reader.readAsDataURL(file);
+  return file.arrayBuffer().then((buffer) => {
+    const bytes = new Uint8Array(buffer);
+    // Chunked deliberately: String.fromCharCode(...) with a huge spread can
+    // overflow some browsers' argument stack on large phone photos.
+    let binary = "";
+    const chunkSize = 0x8000;
+    for (let i = 0; i < bytes.length; i += chunkSize) {
+      binary += String.fromCharCode(...bytes.slice(i, i + chunkSize));
+    }
+    const mime = file.type || "application/octet-stream";
+    return `data:${mime};base64,${btoa(binary)}`;
   });
 }
 
@@ -191,7 +235,7 @@ export async function compressImageFile(
   const source = await readFileAsDataUrl(file);
   try {
     const image = await new Promise<HTMLImageElement>((resolve, reject) => {
-      const img = new Image();
+      const img = document.createElement("img");
       img.onload = () => resolve(img);
       img.onerror = () => reject(new Error("Could not decode image"));
       img.src = source;
@@ -215,17 +259,60 @@ export async function compressImageFile(
 
 let stickerIdCounter = 0;
 
+/**
+ * Upload an image data URL to Cloudinary via the API route, with a local
+ * cache so a repeated upload never re-sends the same bytes.
+ */
+export async function uploadImage(dataUrl: string): Promise<string> {
+  if (!dataUrl || !dataUrl.startsWith("data:image/")) {
+    throw new Error("uploadImage needs a valid image data URL");
+  }
+  // break circular: uploadImage lives here (upload-service), not in
+  // gallery-cloud — gallery-cloud imports from this module
+  const cached = readCachedImageUrl(dataUrl);
+  if (cached) return cached;
+
+  try {
+    const res = await fetch("/api/upload", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ dataUrl }),
+    });
+
+    if (!res.ok) {
+      throw new Error(`uploadImage: server returned ${res.status}`);
+    }
+
+    const json = (await res.json()) as {
+      url?: string;
+      error?: string;
+    };
+
+    if (!json.url) {
+      throw new Error(json.error || "uploadImage: no URL returned");
+    }
+
+    cacheImageUrl(dataUrl, json.url);
+    return json.url;
+  } catch (error) {
+    // If the server is unreachable, keep the data URL so the photo is not lost.
+    // It will be retried next time saving is attempted.
+    console.error(
+      "Birthday site: cloud upload failed, keeping local copy:",
+      error,
+    );
+    return dataUrl;
+  }
+}
+
 export async function uploadSticker(file: File): Promise<CustomSticker> {
-  // Replace this browser-only fallback with a signed Cloudinary upload request.
-  // Cloudinary credentials must stay server-side; only the returned secure URL belongs here.
-  const src = await compressImageFile(file, 320, 0.85);
-  // Unique even for several files picked in the same millisecond — duplicate
-  // ids would collide as React keys and make sticker taps hit the wrong one.
+  const compressed = await compressImageFile(file, 320, 0.85);
+  const url = await uploadImage(compressed);
   stickerIdCounter += 1;
   const random = Math.random().toString(36).slice(2, 8);
   return {
     id: `sticker-${Date.now()}-${stickerIdCounter}-${random}-${file.name}`,
-    src,
+    src: url,
   };
 }
 
@@ -233,25 +320,36 @@ export async function uploadPhoto(
   file: File,
   stickerIndex?: number,
   customStickerSrc?: string,
+  withSticker?: { posX: number; posY: number; scale: number; rotation: number },
+  layout?: UploadedPhoto["layout"],
 ): Promise<UploadedPhoto> {
-  // Replace this browser-only fallback with a signed Cloudinary upload request.
-  // Cloudinary credentials must stay server-side; only the returned secure URL belongs here.
-  const src = await compressImageFile(file);
+  const compressed = await compressImageFile(file);
+  const url = await uploadImage(compressed);
+  const id = `cloudinary-${Date.now()}-${file.name}`;
 
   return {
-    id: `${Date.now()}-${file.name}`,
-    src,
+    id,
+    src: url,
     alt: file.name.replace(/\.[^/.]+$/, ""),
     title: "A new memory",
     date: "Just now",
     caption: "A moment worth keeping.",
-    layout: "square",
+    layout: layout ?? "square",
     stickerIndex,
     customStickerSrc,
-    stickerPositionX: 78,
-    stickerPositionY: 78,
-    stickerScale: 1,
-    stickerRotation: -4,
+    ...(withSticker
+      ? {
+          stickerPositionX: withSticker.posX,
+          stickerPositionY: withSticker.posY,
+          stickerScale: withSticker.scale,
+          stickerRotation: withSticker.rotation,
+        }
+      : {
+          stickerPositionX: 78,
+          stickerPositionY: 78,
+          stickerScale: 1,
+          stickerRotation: -4,
+        }),
   };
 }
 
@@ -261,9 +359,9 @@ export async function replaceUploadedPhoto(
 ): Promise<UploadedPhoto | null> {
   const existing = readUploadedPhotos().find((photo) => photo.id === id);
   if (!existing) return null;
-  const src = await compressImageFile(file);
+  const url = await uploadImage(await compressImageFile(file));
   return updateUploadedPhoto(id, {
-    src,
+    src: url,
     alt: file.name.replace(/\.[^/.]+$/, ""),
   });
 }

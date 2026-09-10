@@ -1,28 +1,48 @@
 import { NextResponse } from "next/server";
-import { put } from "@vercel/blob";
 
 export const runtime = "nodejs";
 
-const MAX_IMAGE_BYTES = 8 * 1024 * 1024;
-
 /**
- * Uploads one album photo (as a data URL from the browser) to Vercel Blob so
- * every device that opens the site sees the same photograph.
- * Requires the BLOB_READ_WRITE_TOKEN environment variable in Vercel.
+ * Uploads one image (data URL from the browser) to Cloudinary using the
+ * unsigned preset configured in the environment, and returns its permanent
+ * URL. This is what makes uploaded photos load on any device — the browser
+ * keeps only the URL, never the image bytes.
+ *
+ * Requires these env vars (already configured in this project):
+ *   NEXT_PUBLIC_CLOUDINARY_CLOUD_NAME
+ *   NEXT_PUBLIC_CLOUDINARY_UPLOAD_PRESET
  */
 export async function POST(request: Request): Promise<NextResponse> {
-  if (!process.env.BLOB_READ_WRITE_TOKEN) {
+  const cloudName = process.env.NEXT_PUBLIC_CLOUDINARY_CLOUD_NAME;
+  const preset = process.env.NEXT_PUBLIC_CLOUDINARY_UPLOAD_PRESET;
+  if (!cloudName || !preset) {
     return NextResponse.json(
-      { error: "Blob storage is not configured" },
+      { error: "Cloudinary is not configured" },
       { status: 503 },
     );
   }
   try {
-    const body: unknown = await request.json();
+    let body: unknown;
+    try {
+      body = await request.json();
+    } catch {
+      return NextResponse.json(
+        { error: "Request body must be JSON" },
+        { status: 400 },
+      );
+    }
     const dataUrl =
       typeof body === "object" && body !== null && "dataUrl" in body
         ? String((body as { dataUrl: unknown }).dataUrl)
         : "";
+    // 18 MB cap — comfortably larger than a phone photo, small enough that a
+    // broken/bogus request can never hang the upload worker.
+    if (dataUrl.length > 18 * 1024 * 1024) {
+      return NextResponse.json(
+        { error: "The image is too large to upload" },
+        { status: 413 },
+      );
+    }
     const match = /^data:(image\/[a-zA-Z0-9.+-]+);base64,(.+)$/.exec(dataUrl);
     if (!match) {
       return NextResponse.json(
@@ -30,24 +50,43 @@ export async function POST(request: Request): Promise<NextResponse> {
         { status: 400 },
       );
     }
-    const [, mime, base64] = match;
-    const buffer = Buffer.from(base64, "base64");
-    if (buffer.byteLength > MAX_IMAGE_BYTES) {
+    const folder =
+      typeof body === "object" && body !== null && "folder" in body
+        ? String((body as { folder: unknown }).folder) || "gallery"
+        : "gallery";
+    const form = new FormData();
+    form.append("file", dataUrl);
+    form.append("upload_preset", preset);
+    form.append("folder", `lunatey/${folder}`);
+    const response = await fetch(
+      `https://api.cloudinary.com/v1_1/${cloudName}/image/upload`,
+      { method: "POST", body: form },
+    );
+    if (!response.ok) {
       return NextResponse.json(
-        { error: "Image is too large" },
-        { status: 413 },
+        {
+          error:
+            response.status === 401 || response.status === 403
+              ? "The upload preset is invalid or the image format is not allowed"
+              : "The image could not be uploaded",
+        },
+        { status: 502 },
       );
     }
-    const extension = mime.split("/")[1]?.replace("jpeg", "jpg") ?? "png";
-    const pathname = `albums/${Date.now()}-${crypto.randomUUID()}.${extension}`;
-    const blob = await put(pathname, buffer, {
-      access: "public",
-      contentType: mime,
-    });
-    return NextResponse.json({ url: blob.url });
+    const data = (await response.json()) as { secure_url?: string };
+    if (!data.secure_url) {
+      return NextResponse.json(
+        { error: "The image could not be uploaded" },
+        { status: 502 },
+      );
+    }
+    return NextResponse.json(
+      { url: data.secure_url },
+      { headers: { "Cache-Control": "no-store" } },
+    );
   } catch {
     return NextResponse.json(
-      { error: "Could not upload the photo" },
+      { error: "The image could not be uploaded" },
       { status: 500 },
     );
   }

@@ -1,0 +1,14 @@
+
+> lunatey-gallery@0.1.0 dev
+> next dev
+
+▲ Next.js 16.3.4 (Turbopack)
+- Local:         http://localhost:3000
+- Network:       http://192.168.1.13:3000
+- Environments: .env.local
+✓ Ready in 665ms
+✓ Running next.config.ts took 45ms
+
+ GET / 200 in 400ms (next.js: 192ms, application-code: 208ms)
+ GET /api/gallery 503 in 164ms (next.js: 124ms, application-code: 40ms)
+[?25h

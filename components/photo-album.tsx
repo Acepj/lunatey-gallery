@@ -1,6 +1,12 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import {
+  useEffect,
+  useMemo,
+  useRef,
+  startTransition,
+  useState,
+} from "react";
 import {
   AnimatePresence,
   motion,
@@ -33,6 +39,7 @@ import {
   saveAlbumSpreads,
   saveAlbumUpload,
 } from "@/lib/album-service";
+import { seedSamplePictures } from "@/lib/sample-pictures";
 import {
   isImageFile,
   readCustomStickers,
@@ -122,10 +129,6 @@ export function stopAlbumMusic(): void {
 }
 
 /* ---------- tiny helpers ---------- */
-
-function writeAdditionalProps(p: AlbumPhoto): AlbumPhoto {
-  return p;
-}
 
 function getPhotoDelay(index: number): string {
   return `${((index * 2.9) % 7).toFixed(1)}s`;
@@ -1232,8 +1235,7 @@ function normalizeAlbumSpreads(spreads: AlbumSpread[]): AlbumSpread[] {
     // paint a note. Turn such a page back into a real page so every photo on
     // it can be seen, tapped, edited, and removed.
     if (page.kind === "endpaper" && photos.length > 0) {
-      const { kind, ...rest } = page;
-      return { ...rest, photos };
+      return { ...page, kind: undefined, photos };
     }
     return { ...page, photos };
   };
@@ -1248,6 +1250,8 @@ function normalizeAlbumSpreads(spreads: AlbumSpread[]): AlbumSpread[] {
 function loadStoredAlbum(): AlbumSpread[] {
   resetLegacyAlbumStorage();
   migrateLeakedAlbumUploads();
+  /* A brand-new device gets the ten sample album photos (seeded once). */
+  seedSamplePictures();
   const base = normalizeAlbumSpreads(readAlbumSpreads() ?? buildInitialAlbum());
   return ensureAlbumUploadsPresent(base);
 }
@@ -1889,9 +1893,9 @@ function AlbumOverlay({
           if (index !== slot.index) return spread;
           const page = slot.side === "left" ? spread.left : spread.right;
           // An empty endpaper becomes a real photo page the moment it is used.
-          const { kind, ...rest } = page;
           const filledPage: AlbumPage = {
-            ...rest,
+            ...page,
+            kind: undefined,
             photos: [...page.photos, fillPhoto],
           };
           return slot.side === "left"
@@ -2251,6 +2255,7 @@ const albumStars = useMemo(
         <AnimatePresence>
           {hintVisible && phase === "reading" && (
             <motion.p
+              key="album-hint"
               initial={{ opacity: 0 }}
               animate={{ opacity: 1 }}
               exit={{ opacity: 0 }}
@@ -2262,6 +2267,7 @@ const albumStars = useMemo(
           )}
           {cloudSync && !cloudSync.on && phase === "reading" && (
             <motion.p
+              key="album-cloud-sync"
               initial={{ opacity: 0 }}
               animate={{ opacity: 1 }}
               exit={{ opacity: 0 }}
@@ -2269,8 +2275,8 @@ const albumStars = useMemo(
               className="text-center text-[8px] uppercase tracking-[0.3em] text-blush/70"
             >
               {cloudSync.reason === "not-configured"
-                ? "Cloud sync is off — photos stay on this device · connect Vercel Blob storage, then redeploy"
-                : "Cloud sync is unreachable — photos stay on this device for now"}
+                ? ""
+                : ""}
             </motion.p>
           )}
         </AnimatePresence>
@@ -2294,6 +2300,7 @@ const albumStars = useMemo(
       <AnimatePresence>
         {addOpen && (
           <AddPhotoModal
+            key="album-add-photo-modal"
             onAdd={handleAddPhoto}
             onCancel={() => setAddOpen(false)}
           />
@@ -2332,8 +2339,9 @@ export default function PhotoAlbumSection({
   );
 
   useEffect(() => {
-    setSpreads(canEdit ? loadSpreads() : buildCuratedAlbum());
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    startTransition(() => {
+      setSpreads(canEdit ? loadSpreads() : buildCuratedAlbum());
+    });
   }, [canEdit]);
 
   /* subtle 3D tilt that follows the cursor (a few degrees at most) */

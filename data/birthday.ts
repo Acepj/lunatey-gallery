@@ -14,12 +14,6 @@ export const birthday = {
   celebrantName: "Lunatey",
   senderName: "Jaypeeru",
   year: "MADE BY AMORTH",
-  /* The celebrant's private key. She enters it once on her own device to
-     unlock her uploaded photos and the album editing tools. Visitors never
-     see them. She can also change this key anytime from the "Unlocked"
-     button — the change is remembered on her device. */
-  celebrantPassphrase: "lunatey",
-  celebrantHint: "The name of this little website.",
   heroImage: "/img/thea9.jpg",
   letterIntro: "Some things are easier to write than say.",
   message: [

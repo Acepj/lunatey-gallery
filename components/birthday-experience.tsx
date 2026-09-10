@@ -28,8 +28,6 @@ import {
   Check,
   Heart,
   ImagePlus,
-  Lock,
-  LockOpen,
   Menu,
   Plus,
   Sparkles,
@@ -62,15 +60,11 @@ import {
   stickerDesigns,
 } from "./stickers";
 import PhotoAlbumSection from "./photo-album";
-import AboutSection from "./about-section";
+import { seedSamplePictures } from "@/lib/sample-pictures";
 import {
-  getCurrentHint,
-  getCurrentPassphrase,
-  isCelebrantUnlocked,
-  setCelebrantUnlocked,
-  setCustomHint,
-  setCustomPassphrase,
-} from "@/lib/celebrant-service";
+  scheduleSave,
+  useSaveSyncState,
+} from "@/lib/album-sync";
 
 type GalleryPhoto = Memory | UploadedPhoto;
 
@@ -94,6 +88,22 @@ const moonPhases = [
   "moon-phase--crescent-left",
 ] as const;
 
+/* Shared navigation targets — used by both the desktop bar and the
+   mobile/tablet menu so they never drift apart. */
+const navLinks: {
+  href: string;
+  label: string;
+  celebrantOnly?: boolean;
+}[] = [
+  { href: "#memories", label: "Memories" },
+  { href: "#album", label: "Album" },
+  { href: "#add", label: "Add a photo", celebrantOnly: true },
+  { href: "#letter", label: "Letter" },
+];
+
+const visibleNavLinks = (isCelebrant: boolean) =>
+  navLinks.filter((link) => !link.celebrantOnly || isCelebrant);
+
 function isUploadedPhoto(photo: GalleryPhoto): photo is UploadedPhoto {
   return !birthday.memories.some((memory) => memory.id === photo.id);
 }
@@ -104,9 +114,46 @@ export default function BirthdayExperience() {
   const [photos, setPhotos] = useState<GalleryPhoto[]>(birthday.memories);
   const [selectedIndex, setSelectedIndex] = useState<number | null>(null);
   const [letterOpen, setLetterOpen] = useState(false);
-  const [isCelebrant, setIsCelebrant] = useState(false);
-  const [gateOpen, setGateOpen] = useState(false);
-  const [manageOpen, setManageOpen] = useState(false);
+  /* The celebrant is always unlocked — no passphrase, no lock screen, and no
+     dividing visitors from contributor. The website opens straight into the
+     full experience on every device. */
+  const isCelebrant = true;
+
+  /* Reliable in-page navigation for every device. Touch browsers are flaky
+     with default anchor jumps while the mobile menu collapses at the same
+     time, so we close the menu first and scroll manually on the next frame,
+     measuring the real header height so sections never land underneath it. */
+  const headerRef = useRef<HTMLElement>(null);
+  const prefersReducedMotion = useReducedMotion();
+
+  const navigateToSection = (event: { preventDefault: () => void }, href: string) => {
+    event.preventDefault();
+    setMobileMenu(false);
+
+    requestAnimationFrame(() => {
+      const behavior: ScrollBehavior = prefersReducedMotion ? "auto" : "smooth";
+      const targetId = href.replace(/^#/, "");
+
+      if (!targetId || targetId === "top") {
+        window.scrollTo({ top: 0, behavior });
+        return;
+      }
+
+      const target = document.getElementById(targetId);
+      if (!target) {
+        // Fall back to the browser's native anchor handling.
+        window.location.hash = href;
+        return;
+      }
+
+      const headerHeight = headerRef.current?.offsetHeight ?? 76;
+      const top =
+        target.getBoundingClientRect().top + window.scrollY - headerHeight - 8;
+
+      window.scrollTo({ top: Math.max(top, 0), behavior });
+    });
+  };
+
   const [pendingFiles, setPendingFiles] = useState<File[]>([]);
   const [uploading, setUploading] = useState(false);
   const [uploaded, setUploaded] = useState(false);
@@ -159,73 +206,52 @@ export default function BirthdayExperience() {
   const foregroundStarsY = useTransform(scrollYProgress, [0, 1], [0, -22]);
 
   useEffect(() => {
-    // The celebrant's unlock is remembered on her own device — so days,
-    // months or years later the site comes back exactly as she left it.
-    setIsCelebrant(isCelebrantUnlocked());
-  }, []);
-
-  useEffect(() => {
+    /* First run on this device gets the sample pictures (once). */
+    seedSamplePictures();
     const timer = window.setTimeout(() => setIsLoading(false), 1600);
     startTransition(() => {
-      // Visitors only ever see the photographs that ship with the site.
-      // The celebrant's uploads appear the moment she unlocks — and photos
-      // added inside the album never show here ("album-upload-" prefix).
-      setPhotos(
-        isCelebrant
-          ? [
-              ...readUploadedPhotos().filter(
-                (photo) => !photo.id.startsWith("album-upload-"),
-              ),
-              ...birthday.memories,
-            ]
-          : [...birthday.memories],
-      );
+      setPhotos([
+        ...readUploadedPhotos().filter(
+          (photo) => !photo.id.startsWith("album-upload-"),
+        ),
+        ...birthday.memories,
+      ]);
       setCustomStickers(readCustomStickers());
     });
     return () => window.clearTimeout(timer);
-  }, [isCelebrant]);
+  }, []);
 
-  function unlockCelebrant(passphrase: string): boolean {
-    const ok =
-      passphrase.trim().toLowerCase() ===
-      getCurrentPassphrase().toLowerCase();
-    if (!ok) return false;
-    setCelebrantUnlocked(true);
-    setIsCelebrant(true);
-    setGateOpen(false);
-    return true;
+  /* Cloud sync: the save-status hook loads the shared cloud copy on mount and
+     bumps `revision` whenever a remote snapshot is applied (for example,
+     photos added on another phone). Re-reading storage here is what makes
+     other devices' photos, albums and stickers appear automatically. */
+  const saveSync = useSaveSyncState();
+
+  useEffect(() => {
+    /* A cloud snapshot may have arrived, so top up the samples if the local
+       store is empty again (for example a fresh cloud copy with no photos). */
+    seedSamplePictures();
+    startTransition(() => {
+      setPhotos([
+        ...readUploadedPhotos().filter(
+          (photo) => !photo.id.startsWith("album-upload-"),
+        ),
+        ...birthday.memories,
+      ]);
+      setCustomStickers(readCustomStickers());
+    });
+  }, [saveSync.revision]);
+
+  /** Push the current memories/stickers to the cloud (reads fresh storage). */
+  function queueCloudSaveNow(): void {
+    void scheduleSave({
+      memories: readUploadedPhotos(),
+      customStickers: readCustomStickers(),
+    });
   }
 
-  /* The celebrant can change her key anytime — remembered on her device. */
-  function changePassphrase(
-    current: string,
-    next: string,
-    confirm: string,
-  ): string | null {
-    if (current.trim().toLowerCase() !== getCurrentPassphrase().toLowerCase()) {
-      return "The current key isn't right.";
-    }
-    if (next.trim().length < 3) {
-      return "The new key needs at least 3 characters.";
-    }
-    if (next.trim() !== confirm.trim()) {
-      return "The two new keys don't match.";
-    }
-    setCustomPassphrase(next.trim());
-    return null;
-  }
-
-  function changeHint(hint: string): void {
-    setCustomHint(hint.trim() || null);
-  }
-
-  function lockCelebrant(): void {
-    setCelebrantUnlocked(false);
-    setIsCelebrant(false);
-    setSelectedIndex(null);
-    setEditingPhotoId(null);
-    setGateOpen(false);
-  }
+  /* The celebrant is always unlocked — no passphrase, no key, no lock. All
+     of these helpers existed only for the removed passphrase system. */
 
   useEffect(() => {
     return () => {
@@ -269,6 +295,7 @@ export default function BirthdayExperience() {
     setCustomStickers((current) => [...newStickers, ...current]);
     if (newStickers.length > 0) {
       setSelectedSticker(stickerDesigns.length);
+      queueCloudSaveNow();
     }
     event.target.value = "";
   }
@@ -278,6 +305,7 @@ export default function BirthdayExperience() {
     stickerAbsoluteIndex: number,
   ): void {
     removeCustomSticker(stickerId);
+    queueCloudSaveNow();
     setCustomStickers((current) => current.filter((s) => s.id !== stickerId));
     if (selectedSticker === stickerAbsoluteIndex) {
       setSelectedSticker(0);
@@ -338,6 +366,7 @@ export default function BirthdayExperience() {
       setPhotos((current) => [...savedPhotos, ...current]);
       setPendingFiles([]);
       setUploaded(true);
+      queueCloudSaveNow();
     } catch {
       setUploadError(
         "Those photos could not be saved. Try a smaller batch or smaller image files.",
@@ -350,6 +379,7 @@ export default function BirthdayExperience() {
   function deleteUploadedPhoto(photo: GalleryPhoto): void {
     if (!isUploadedPhoto(photo) || selectedIndex === null) return;
     removeUploadedPhoto(photo.id);
+    queueCloudSaveNow();
     const deletedIndex = selectedIndex;
     const nextLength = photos.length - 1;
     setPhotos((current) => current.filter((item) => item.id !== photo.id));
@@ -450,6 +480,7 @@ export default function BirthdayExperience() {
       setReplaceFile(null);
       setReplacePreview(null);
       setPhotoNotice("Memory updated");
+      queueCloudSaveNow();
     } catch {
       setPhotoNotice("This memory could not be updated.");
     } finally {
@@ -691,8 +722,48 @@ export default function BirthdayExperience() {
         )}
       </AnimatePresence>
 
+      {/* Auto-save indicator — “Saving… / Saved ✓ / Failed to save”.
+          It only shows “Saved ✓” after the cloud accepted the newest state;
+          without a cloud token it still reports “Saved on this device”. */}
+      <AnimatePresence>
+        {saveSync.saveStatus !== "idle" && (
+          <motion.p
+            key={saveSync.saveStatus}
+            initial={{ opacity: 0, y: 12 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: 8 }}
+            title={saveSync.saveMessage || "Save status"}
+            className={`fixed bottom-6 left-6 z-[70] flex items-center gap-2 rounded-full border px-4 py-2 text-[9px] uppercase tracking-[0.18em] shadow-2xl shadow-black/30 backdrop-blur-md ${
+              saveSync.saveStatus === "error"
+                ? "border-red-300/40 bg-ink/90 text-red-300"
+                : saveSync.saveStatus === "saving"
+                  ? "border-white/20 bg-ink/90 text-sand/70"
+                  : "border-blush/30 bg-ink/90 text-blush"
+            }`}
+          >
+            <span
+              className={`h-2 w-2 rounded-full ${
+                saveSync.saveStatus === "error"
+                  ? "bg-red-300"
+                  : saveSync.saveStatus === "saving"
+                    ? "animate-pulse bg-sand/70"
+                    : "bg-blush"
+              }`}
+            />
+            {saveSync.saveStatus === "saving"
+              ? "Saving…"
+              : saveSync.saveStatus === "error"
+                ? "Failed to save"
+                : saveSync.cloud.on
+                  ? "Saved ✓"
+                  : "Saved on this device"}
+          </motion.p>
+        )}
+      </AnimatePresence>
+
       {/* Navigation */}
       <motion.header
+        ref={headerRef}
         initial={{ opacity: 0, y: -8 }}
         animate={{ opacity: isLoading ? 0 : 1, y: isLoading ? -8 : 0 }}
         transition={{ delay: navDelay, duration: 1.2, ease }}
@@ -701,32 +772,25 @@ export default function BirthdayExperience() {
         <div className="mx-auto flex h-[76px] max-w-[1440px] items-center justify-between px-6 md:px-10 lg:px-16">
           <a
             href="#top"
+            onClick={(event) => navigateToSection(event, "#top")}
             className="font-serif text-lg italic tracking-tight transition-opacity duration-300 hover:opacity-80"
           >
             a little something
           </a>
           <nav className="hidden items-center gap-10 text-[10px] uppercase tracking-[0.24em] text-sand/70 md:flex">
-            <NavLink href="#memories" label="Memories" />
-            <NavLink href="#album" label="Album" />
-            {isCelebrant && <NavLink href="#add" label="Add a photo" />}
-            <NavLink href="#about" label="How it works" />
-            <NavLink href="#letter" label="Letter" />
+            {visibleNavLinks(isCelebrant).map((item) => (
+              <NavLink
+                key={item.href}
+                href={item.href}
+                label={item.label}
+                onNavigate={navigateToSection}
+              />
+            ))}
           </nav>
           <button
-            onClick={() => (isCelebrant ? setManageOpen(true) : setGateOpen(true))}
-            aria-label={
-              isCelebrant
-                ? "Your private key settings"
-                : "Unlock your private photos"
-            }
-            className="hidden items-center gap-2 rounded-full border border-white/15 px-3.5 py-2 text-[9px] uppercase tracking-[0.2em] text-sand/80 transition-all duration-300 hover:border-blush/60 hover:text-blush lg:inline-flex"
-          >
-            {isCelebrant ? <LockOpen size={12} /> : <Lock size={12} />}
-            {isCelebrant ? "Unlocked" : "Private"}
-          </button>
-          <button
             aria-label="Toggle menu"
-            className="rounded-full p-2 text-sand transition hover:bg-white/10 md:hidden"
+            aria-expanded={mobileMenu}
+            className="rounded-full p-2 text-sand transition hover:bg-white/10 active:bg-white/15 md:hidden"
             onClick={() => setMobileMenu((open) => !open)}
           >
             {mobileMenu ? <X size={19} /> : <Menu size={19} />}
@@ -734,48 +798,31 @@ export default function BirthdayExperience() {
         </div>
         <AnimatePresence>
           {mobileMenu && (
+            /* Overlay panel instead of a height-animated dropdown: no
+               measured inline heights, so it can never clip links on
+               phones or tablets (Safari's collapsing URL bar, orientation
+               changes, late-loading fonts, …). */
             <motion.nav
-              initial={{ height: 0, opacity: 0 }}
-              animate={{ height: "auto", opacity: 1 }}
-              exit={{ height: 0, opacity: 0 }}
-              className="border-t border-white/10 px-6 py-5 md:hidden"
+              initial={{ opacity: 0, y: -8 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: -8 }}
+              transition={{ duration: 0.25, ease }}
+              className="absolute inset-x-0 top-full max-h-[calc(100dvh-76px)] overflow-y-auto border-t border-white/10 bg-ink/95 px-6 py-5 backdrop-blur-md md:hidden"
             >
-              <div className="flex flex-col gap-5 text-[11px] uppercase tracking-[0.24em] text-sand/80">
-                {[
-                  { href: "#memories", label: "Memories" },
-                  { href: "#album", label: "Album" },
-                  ...(isCelebrant
-                    ? [{ href: "#add", label: "Add a photo" }]
-                    : []),
-                  { href: "#about", label: "How it works" },
-                  { href: "#letter", label: "Letter" },
-                ].map((item, i) => (
+              <div className="flex flex-col gap-2 text-[11px] uppercase tracking-[0.24em] text-sand/80">
+                {visibleNavLinks(isCelebrant).map((item, i) => (
                   <motion.a
                     key={item.href}
                     href={item.href}
-                    onClick={() => setMobileMenu(false)}
+                    onClick={(event) => navigateToSection(event, item.href)}
                     initial={{ opacity: 0, x: -12 }}
                     animate={{ opacity: 1, x: 0 }}
-                    transition={{ delay: 0.1 + i * 0.08, duration: 0.5, ease }}
-                    className="transition-colors duration-300 hover:text-ivory"
+                    transition={{ delay: 0.05 + i * 0.06, duration: 0.4, ease }}
+                    className="-mx-2 rounded-lg px-2 py-3 transition-colors duration-300 hover:bg-white/5 hover:text-ivory active:bg-white/10"
                   >
                     {item.label}
                   </motion.a>
                 ))}
-                <button
-                  onClick={() => {
-                    setMobileMenu(false);
-                    if (isCelebrant) {
-                      setManageOpen(true);
-                    } else {
-                      setGateOpen(true);
-                    }
-                  }}
-                  className="flex items-center gap-2 text-left transition-colors duration-300 hover:text-blush"
-                >
-                  {isCelebrant ? <LockOpen size={13} /> : <Lock size={13} />}
-                  {isCelebrant ? "Private key settings" : "Celebrant key"}
-                </button>
               </div>
             </motion.nav>
           )}
@@ -1289,27 +1336,6 @@ export default function BirthdayExperience() {
         </div>
       </section>
       )}
-
-      {/* How it works — a little guide */}
-      <AboutSection />
-
-      {/* celebrant privacy gate */}
-      <AnimatePresence>
-        {gateOpen && (
-          <CelebrantGateModal
-            onClose={() => setGateOpen(false)}
-            onUnlock={unlockCelebrant}
-          />
-        )}
-        {manageOpen && isCelebrant && (
-          <CelebrantManageModal
-            onClose={() => setManageOpen(false)}
-            onLock={lockCelebrant}
-            onChangePassphrase={changePassphrase}
-            onChangeHint={changeHint}
-          />
-        )}
-      </AnimatePresence>
 
       {/* Letter */}
       <section
@@ -1970,244 +1996,22 @@ function LoadingScreen() {
   );
 }
 
-/* ---------- the celebrant's private unlock ---------- */
-
-function CelebrantGateModal({
-  onClose,
-  onUnlock,
+/* Navigation link with growing underline. Uses the shared scroll handler so
+   tablets/iPads (which see the desktop bar) behave identically to mobile. */
+function NavLink({
+  href,
+  label,
+  onNavigate,
 }: {
-  onClose: () => void;
-  onUnlock: (passphrase: string) => boolean;
+  href: string;
+  label: string;
+  onNavigate?: (event: { preventDefault: () => void }, href: string) => void;
 }) {
-  const [value, setValue] = useState("");
-  const [error, setError] = useState(false);
-  return (
-    <motion.div
-      initial={{ opacity: 0 }}
-      animate={{ opacity: 1 }}
-      exit={{ opacity: 0 }}
-      className="fixed inset-0 z-[90] flex items-center justify-center bg-black/65 p-4 backdrop-blur-sm"
-      onClick={onClose}
-    >
-      <motion.div
-        initial={{ opacity: 0, y: 18, scale: 0.97 }}
-        animate={{ opacity: 1, y: 0, scale: 1 }}
-        exit={{ opacity: 0, y: 12, scale: 0.97 }}
-        transition={{ duration: 0.4, ease }}
-        onClick={(event) => event.stopPropagation()}
-        className="w-full max-w-sm rounded-xl border border-white/10 bg-[#241b18] p-7 text-center shadow-2xl shadow-black/60"
-      >
-        <span className="mx-auto flex h-11 w-11 items-center justify-center rounded-full border border-blush/40 text-blush">
-          <Lock size={16} />
-        </span>
-        <p className="mt-4 font-serif text-xl italic text-ivory">
-          For the celebrant only
-        </p>
-        <p className="mt-2 text-xs leading-6 text-sand/60">
-          Her photographs are kept private on this website. Enter the little
-          key to unlock them on this device.
-        </p>
-        <form
-          onSubmit={(event) => {
-            event.preventDefault();
-            if (!onUnlock(value)) {
-              setError(true);
-            } else {
-              setValue("");
-            }
-          }}
-        >
-          <input
-            type="password"
-            value={value}
-            autoFocus
-            onChange={(event) => {
-              setValue(event.target.value);
-              setError(false);
-            }}
-            placeholder="Your passphrase"
-            className="mt-5 w-full rounded-full border border-white/15 bg-black/30 px-5 py-3 text-center text-sm text-ivory outline-none transition-colors duration-300 placeholder:text-sand/35 focus:border-blush/60"
-          />
-          {error && (
-            <p className="mt-2 text-xs text-blush">
-              That isn&rsquo;t the key. Try once more.
-            </p>
-          )}
-          <p className="mt-3 text-[10px] uppercase tracking-[0.2em] text-sand/40">
-            {getCurrentHint()}
-          </p>
-          <div className="mt-5 flex justify-center gap-3">
-            <button
-              type="button"
-              onClick={onClose}
-              className="rounded-full border border-white/20 px-5 py-3 text-[10px] uppercase tracking-[0.2em] text-sand transition-all duration-300 hover:border-white hover:scale-[1.03]"
-            >
-              Not now
-            </button>
-            <button
-              type="submit"
-              className="rounded-full bg-ivory px-5 py-3 text-[10px] uppercase tracking-[0.2em] text-ink transition-all duration-300 hover:bg-blush hover:scale-[1.03]"
-            >
-              Unlock
-            </button>
-          </div>
-        </form>
-      </motion.div>
-    </motion.div>
-  );
-}
-
-/* ---------- the celebrant's private key settings ---------- */
-
-function CelebrantManageModal({
-  onClose,
-  onLock,
-  onChangePassphrase,
-  onChangeHint,
-}: {
-  onClose: () => void;
-  onLock: () => void;
-  onChangePassphrase: (
-    current: string,
-    next: string,
-    confirm: string,
-  ) => string | null;
-  onChangeHint: (hint: string) => void;
-}) {
-  const [current, setCurrent] = useState("");
-  const [next, setNext] = useState("");
-  const [confirm, setConfirm] = useState("");
-  const [hint, setHint] = useState("");
-  const [error, setError] = useState<string | null>(null);
-  const [saved, setSaved] = useState(false);
-
-  return (
-    <motion.div
-      initial={{ opacity: 0 }}
-      animate={{ opacity: 1 }}
-      exit={{ opacity: 0 }}
-      className="fixed inset-0 z-[90] flex items-center justify-center bg-black/65 p-4 backdrop-blur-sm"
-      onClick={onClose}
-    >
-      <motion.div
-        initial={{ opacity: 0, y: 18, scale: 0.97 }}
-        animate={{ opacity: 1, y: 0, scale: 1 }}
-        exit={{ opacity: 0, y: 12, scale: 0.97 }}
-        transition={{ duration: 0.4, ease }}
-        onClick={(event) => event.stopPropagation()}
-        className="max-h-[92vh] w-full max-w-sm overflow-y-auto rounded-xl border border-white/10 bg-[#241b18] p-7 shadow-2xl shadow-black/60"
-      >
-        <span className="mx-auto flex h-11 w-11 items-center justify-center rounded-full border border-blush/40 text-blush">
-          <LockOpen size={16} />
-        </span>
-        <p className="mt-4 text-center font-serif text-xl italic text-ivory">
-          Your private key
-        </p>
-        <p className="mt-2 text-center text-xs leading-6 text-sand/60">
-          Your photographs stay hidden from every visitor until this key is
-          entered on their device. You can change it whenever you like.
-        </p>
-        <form
-          className="mt-5 space-y-4"
-          onSubmit={(event) => {
-            event.preventDefault();
-            const result = onChangePassphrase(current, next, confirm);
-            if (result) {
-              setError(result);
-              setSaved(false);
-            } else {
-              setError(null);
-              setSaved(true);
-              setCurrent("");
-              setNext("");
-              setConfirm("");
-              onChangeHint(hint);
-            }
-          }}
-        >
-          {[
-            {
-              value: current,
-              onChange: setCurrent,
-              placeholder: "Current passphrase",
-              autoComplete: "current-password",
-            },
-            {
-              value: next,
-              onChange: setNext,
-              placeholder: "New passphrase",
-              autoComplete: "new-password",
-            },
-            {
-              value: confirm,
-              onChange: setConfirm,
-              placeholder: "Repeat new passphrase",
-              autoComplete: "new-password",
-            },
-          ].map((field) => (
-            <input
-              key={field.placeholder}
-              type="password"
-              value={field.value}
-              autoComplete={field.autoComplete}
-              onChange={(event) => {
-                field.onChange(event.target.value);
-                setError(null);
-                setSaved(false);
-              }}
-              placeholder={field.placeholder}
-              className="w-full rounded-full border border-white/15 bg-black/30 px-5 py-3 text-center text-sm text-ivory outline-none transition-colors duration-300 placeholder:text-sand/35 focus:border-blush/60"
-            />
-          ))}
-          <input
-            type="text"
-            value={hint}
-            onChange={(event) => {
-              setHint(event.target.value);
-              setSaved(false);
-            }}
-            placeholder="A reminder hint (optional)"
-            className="w-full rounded-full border border-white/15 bg-black/30 px-5 py-3 text-center text-sm text-ivory outline-none transition-colors duration-300 placeholder:text-sand/35 focus:border-blush/60"
-          />
-          {error && <p className="text-center text-xs text-blush">{error}</p>}
-          {saved && (
-            <p className="flex items-center justify-center gap-2 text-center text-xs text-blush">
-              <Check size={13} /> Your new key has been saved on this device.
-            </p>
-          )}
-          <div className="flex justify-center gap-3 pt-1">
-            <button
-              type="submit"
-              className="rounded-full bg-ivory px-5 py-3 text-[10px] uppercase tracking-[0.2em] text-ink transition-all duration-300 hover:bg-blush hover:scale-[1.03]"
-            >
-              Save new key
-            </button>
-            <button
-              type="button"
-              onClick={onLock}
-              className="rounded-full border border-white/20 px-5 py-3 text-[10px] uppercase tracking-[0.2em] text-sand transition-all duration-300 hover:border-white hover:scale-[1.03]"
-            >
-              Lock now
-            </button>
-          </div>
-        </form>
-        <button
-          onClick={onClose}
-          className="mt-5 w-full text-center text-[10px] uppercase tracking-[0.2em] text-sand/50 transition-colors duration-300 hover:text-sand"
-        >
-          Close
-        </button>
-      </motion.div>
-    </motion.div>
-  );
-}
-
-/* Navigation link with growing underline */
-function NavLink({ href, label }: { href: string; label: string }) {
   return (
     <a
       href={href}
-      className="group relative py-1 transition-colors duration-300 hover:text-ivory"
+      onClick={onNavigate ? (event) => onNavigate(event, href) : undefined}
+      className="group relative py-2 transition-colors duration-300 hover:text-ivory"
     >
       <span className="transition-[letter-spacing] duration-300 group-hover:tracking-[0.32em]">
         {label}

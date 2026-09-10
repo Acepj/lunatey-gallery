@@ -94,6 +94,16 @@ export function saveAlbumUpload(photo: UploadedPhoto): void {
 }
 
 /**
+ * Overwrite the whole album-upload list in one write. Used by the cloud sync
+ * layer so a pulled snapshot replaces (never duplicates) what is local, and
+ * so photos removed on another device stay removed here.
+ */
+export function replaceAlbumUploads(photos: UploadedPhoto[]): void {
+  if (typeof window === "undefined") return;
+  safeWrite(albumUploadStorageKey, JSON.stringify(photos));
+}
+
+/**
  * Keep only upload records whose photo is still placed inside the saved book.
  * This makes a photo removal permanent: removing a photo from a page (and
  * saving) also drops its upload record, so it can never be re-added later.
