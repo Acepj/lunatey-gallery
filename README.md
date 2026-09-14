@@ -1,6 +1,6 @@
 # A Little Something For Lunatey — birthday gallery
 
-A Next.js 16 birthday gallery for the celebrant. Visitors can upload
+A Next.js 20 birthday gallery for the celebrant. Visitors can upload
 photographs, add memories, curate a photo album, and place stickers — every
 change auto-saves and appears on every device from the same link.
 
