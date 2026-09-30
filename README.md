@@ -1,4 +1,4 @@
-# A Little Something For Lunatey — birthday gallery
+# A Little Something For Someone — birthday gallery
 
 A Next.js 20 birthday gallery for the celebrant. Visitors can upload
 photographs, add memories, curate a photo album, and place stickers — every
